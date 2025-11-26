@@ -484,7 +484,6 @@ class DocumentToExcelConverter:
                 
         if text_content:
             # Tentar parsear como Gherkin
-            # QA Crys
             lines = text_content.split('.')
             for line in lines:
                 line = line.strip().lower()
@@ -496,9 +495,9 @@ class DocumentToExcelConverter:
                     test_case['entao'] = line
                     
         return test_case if any(test_case.values()) else None
-    
+
+    # INICIO DA FUNÇÃO
     def parse_test_cases(self, content):
-        """Analisa casos de teste de texto"""
         test_cases = []
         lines = content.split('\n')
         
@@ -509,46 +508,132 @@ class DocumentToExcelConverter:
             'quando': '',
             'entao': ''
         }
+        # Variável de estado para a palavra-chave Gherkin atual
+        current_gherkin_field = None 
         
+        # Palavras-chave de detecção para evitar falsos positivos no texto de continuação QACRYS
+        case_separators = ['historia', 'requisito', 'user story', 'cenário', 'scenario', 'teste']
+        
+        def is_new_separator(line):
+            """Verifica se a linha é um separador de caso (Requisito/Cenário)"""
+            lower_line = line.lower()
+            return any(sep in lower_line for sep in case_separators)
+
         for line in lines:
             line = line.strip()
+            
             if not line:
+                # Linha vazia: finaliza o bloco de texto atual, mas não reseta o caso
+                current_gherkin_field = None
                 continue
                 
             lower_line = line.lower()
             
-            if any(keyword in lower_line for keyword in ['história', 'historia', 'requisito', 'user story']):
-                if current_case['historia_requisito'] and any(current_case.values()):
+            # 1. DETECÇÃO POR SEPARADORES (Requisito/Cenário)
+            if 'historia/requisito:' in lower_line or 'história/requisito:' in lower_line or 'feature:' in lower_line or (is_new_separator(line) and 'cenário' not in lower_line and 'teste' not in lower_line):
+                # Se encontrar um novo Requisito, salva o caso anterior se tiver conteúdo
+                if any(current_case.values()):
+                    # Limpa o whitespace final antes de salvar
+                    for key in current_case: current_case[key] = current_case[key].strip()
                     test_cases.append(current_case.copy())
                 current_case = {key: '' for key in current_case}
-                current_case['historia_requisito'] = line
+                current_case['historia_requisito'] = self.extract_after_colon(line)
+                current_gherkin_field = None
+                continue
+                    
+            elif 'cenário:' in lower_line or 'scenario:' in lower_line or 'teste:' in lower_line or ('cenário' in lower_line or 'scenario' in lower_line or 'teste' in lower_line):
+                # Se encontrar um novo Cenário, zera os passos Gherkin e define o Cenário
+                if current_case['teste'] and any(current_case.values()):
+                    # Se já houver um cenário (múltiplos cenários no mesmo Requisito)
+                    for key in current_case: current_case[key] = current_case[key].strip()
+                    test_cases.append(current_case.copy())
+                    current_case = {
+                        'historia_requisito': current_case['historia_requisito'], # Mantém o Requisito
+                        'teste': '', 'dado': '', 'quando': '', 'entao': ''
+                    }
+                    
+                current_case['teste'] = self.extract_after_colon(line)
+                current_gherkin_field = None
+                continue
                 
-            elif any(keyword in lower_line for keyword in ['cenário', 'scenario', 'teste']):
-                current_case['teste'] = line
+            # 2. DETECÇÃO E MUDANÇA DE ESTADO GHERKIN
+            elif lower_line.startswith('dado') or lower_line.startswith('given'):
+                current_gherkin_field = 'dado'
+                current_case['dado'] += self.clean_gherkin_keyword(line) + " "
+                continue
+                    
+            elif lower_line.startswith('quando') or lower_line.startswith('when'):
+                current_gherkin_field = 'quando'
+                current_case['quando'] += self.clean_gherkin_keyword(line) + " "
+                continue
+                    
+            elif lower_line.startswith('então') or lower_line.startswith('entao') or lower_line.startswith('then'):
+                current_gherkin_field = 'entao'
+                current_case['entao'] += self.clean_gherkin_keyword(line) + " "
+                continue
+            
+            # 3. CONTINUAÇÃO DE TEXTO
+            elif current_gherkin_field:
+                # Se estiver em um estado Gherkin e a linha não for um novo passo/separador,
+                # adiciona a linha como continuação
+                current_case[current_gherkin_field] += line + " "
                 
-            elif any(keyword in lower_line for keyword in ['dado', 'given']):
-                current_case['dado'] = self.clean_gherkin_keyword(line)
-                
-            elif any(keyword in lower_line for keyword in ['quando', 'when']):
-                current_case['quando'] = self.clean_gherkin_keyword(line)
-                
-            elif any(keyword in lower_line for keyword in ['então', 'then']):
-                current_case['entao'] = self.clean_gherkin_keyword(line)
-                
+        # Adiciona o último caso (limpa o whitespace final)
         if any(current_case.values()):
+            for key in current_case:
+                current_case[key] = current_case[key].strip()
             test_cases.append(current_case)
             
         return test_cases if test_cases else self.create_fallback_cases(content)
+
+    def clean_gherkin_keyword(self, text):
+        """Remove palavras-chave Gherkin e limpa espaços (v2)"""
+        keywords = ['dado que', 'dado', 'given', 'quando', 'when', 'então', 'entao', 'then', 'e', 'and']
+        
+        # Cria uma lista de padrões de expressão regular para Gherkin seguido por espaço, vírgula ou dois pontos
+        regex_patterns = [rf"^{re.escape(kw)}[\s:,]" for kw in keywords]
+        
+        lower_text = text.lower()
+        
+        for keyword in keywords:
+            # 1. Tenta encontrar a palavra-chave exatamente no início da linha
+            if lower_text.startswith(keyword):
+                # 2. Tenta remover a palavra-chave seguida por qualquer separador comum (espaço, vírgula, dois pontos)
+                # Exemplo: "Dado:..." ou "Quando,..."
+                pattern = rf"^{re.escape(keyword)}[\s:,]*"
+                match = re.match(pattern, text, re.IGNORECASE)
+                
+                if match:
+                    # Retorna o texto após a correspondência, mantendo a capitalização original do corpo do texto
+                    return text[match.end():].strip()
+                
+        # Fallback: se não começar com palavra-chave reconhecida, retorna o texto original
+        return text.strip()
+    #FIM DA FUNÇÃO
+
+    def extract_after_colon(self, text):
+        """Extrai texto após dois pontos, se existir"""
+        if ':' in text:
+            return text.split(':', 1)[1].strip()
+        return text.strip()
     
     def clean_gherkin_keyword(self, text):
         """Remove palavras-chave Gherkin"""
-        keywords = ['dado que', 'dado', 'given', 'quando', 'when', 'então', 'entao', 'then']
+        keywords = ['dado que', 'dado', 'given', 'quando', 'when', 'então', 'entao', 'then', 'e', 'and']
         cleaned_text = text.lower()
+        
+        # Tenta remover a palavra-chave no início da linha
         for keyword in keywords:
             if cleaned_text.startswith(keyword):
+                # Se a palavra-chave estiver seguida por ":" (como "Quando:"), preserva o texto após ":"
+                if ':' in text:
+                    return text.split(':', 1)[1].strip()
+                # Senão, remove a palavra-chave e capitaliza
                 return text[len(keyword):].strip().capitalize()
+                
+        # Fallback: se não começar com palavra-chave, retorna o texto original
         return text
-    
+
     def create_fallback_cases(self, content):
         """Cria casos de teste fallback"""
         test_cases = []
