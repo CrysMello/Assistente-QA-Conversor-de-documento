@@ -5,6 +5,11 @@ import os
 import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import re
+import sys
+from datetime import datetime
+
+# Bibliotecas de terceiros que precisam ser instaladas
 try:
     import PyPDF2
 except ImportError:
@@ -12,12 +17,24 @@ except ImportError:
         import pypdf as PyPDF2
     except ImportError:
         messagebox.showerror("Erro", "Biblioteca PDF não encontrada. Instale PyPDF2 ou pypdf.")
-import docx
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from datetime import datetime
-import re
-import sys
+
+try:
+    import docx
+except ImportError:
+    messagebox.showerror("Erro", "Biblioteca docx não encontrada. Instale python-docx.")
+    
+try:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+except ImportError:
+    messagebox.showerror("Erro", "Biblioteca openpyxl não encontrada. Instale openpyxl.")
+
+# Adicionando a biblioteca tabula-py, que é necessária para extração de tabelas PDF
+try:
+    from tabula import read_pdf
+except ImportError:
+    # A falha aqui é esperada se o PyInstaller não for rodado corretamente.
+    pass 
 
 class DocumentToExcelConverter:
     def __init__(self, root):
@@ -26,7 +43,6 @@ class DocumentToExcelConverter:
         self.root.geometry("1200x800")
         self.root.configure(bg='#f0f0f0')
         
-        # Centralizar janela
         self.center_window()
         
         self.current_file = None
@@ -168,26 +184,55 @@ class DocumentToExcelConverter:
         # Treeview
         self.setup_preview_tree(preview_frame)
         
+        # As barras de rolagem são criadas dentro de setup_preview_tree para recriação correta
+        # Mas precisamos delas aqui para garantir que self.preview_tree exista para o grid:
+        if not hasattr(self, 'preview_tree'):
+            self.preview_tree = ttk.Treeview(preview_frame, columns=['#0'], show='headings')
+
         v_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=self.preview_tree.yview)
         h_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
-        self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
         
         self.preview_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
         h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
-
+        
+        
     def setup_preview_tree(self, parent_frame):
-        """Configura a treeview de pré-visualização"""
+        """Configura a treeview de pré-visualização, destruindo a existente se necessário."""
         current_template = self.templates[self.current_template]
         columns = current_template["columns"]
+    
+        # 1. Destruir treeview e scrollbars existentes para evitar sobreposição
+        for widget in parent_frame.winfo_children():
+            if isinstance(widget, ttk.Treeview):
+                widget.destroy()
+            elif isinstance(widget, ttk.Scrollbar):
+                widget.destroy()
+    
+        # 2. Criar o novo Treeview
         self.preview_tree = ttk.Treeview(parent_frame, columns=columns, show='headings', height=15)
         
+        # 3. Configurar Barras de Rolagem
+        v_scrollbar = ttk.Scrollbar(parent_frame, orient=tk.VERTICAL, command=self.preview_tree.yview)
+        h_scrollbar = ttk.Scrollbar(parent_frame, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
+        self.preview_tree.configure(yscrollcommand=v_scrollbar.set, xscrollcommand=h_scrollbar.set)
+
+        # 4. Configurar Cabeçalhos e Colunas
         for col in columns:
             self.preview_tree.heading(col, text=col)
             self.preview_tree.column(col, width=150)
         
         self.preview_tree.bind('<Double-1>', self.on_double_click)
 
+        # 5. Posicionar o Treeview e as Barras
+        self.preview_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
+    
+        # 6. Recarregar dados se existirem
+        if hasattr(self, 'preview_data') and self.preview_data:
+            self.update_preview_tree()
+        
     def setup_template_tab(self):
         """Configura a aba de templates"""
         # Frame de seleção de template
@@ -243,17 +288,22 @@ class DocumentToExcelConverter:
         self.recommendations_text.pack(fill='both', expand=True)
         
     def on_template_change(self, event=None):
-        """Atualiza o template atual"""
+        """Atualiza o template atual e recria o Treeview."""
         self.current_template = self.template_var.get()
         self.update_template_display()
-        # Recriar a treeview com as novas colunas
+
+        # Encontra o frame pai de pré-visualização
+        preview_frame = None
         for widget in self.main_frame.winfo_children():
             if isinstance(widget, ttk.LabelFrame) and "PRÉ-VISUALIZAÇÃO" in widget.cget('text'):
-                for child in widget.winfo_children():
-                    if isinstance(child, ttk.Treeview):
-                        child.destroy()
-                self.setup_preview_tree(widget)
+                preview_frame = widget
                 break
+        
+        if preview_frame:
+            # Recria o Treeview com as novas colunas
+            self.setup_preview_tree(preview_frame)
+        else:
+            messagebox.showerror("Erro", "Não foi possível encontrar o frame de pré-visualização.")
         
     def update_template_display(self):
         """Atualiza a exibição do template"""
@@ -496,8 +546,9 @@ class DocumentToExcelConverter:
                     
         return test_case if any(test_case.values()) else None
 
-    # INICIO DA FUNÇÃO
+    # CORREÇÃO INTEGRADA DA FUNÇÃO DE PARSING (VERSÃO FINAL)
     def parse_test_cases(self, content):
+        """Analisa casos de teste de texto, incluindo separação de Gherkin multi-linha."""
         test_cases = []
         lines = content.split('\n')
         
@@ -508,32 +559,24 @@ class DocumentToExcelConverter:
             'quando': '',
             'entao': ''
         }
-        # Variável de estado para a palavra-chave Gherkin atual
         current_gherkin_field = None 
-        
-        # Palavras-chave de detecção para evitar falsos positivos no texto de continuação QACRYS
-        case_separators = ['historia', 'requisito', 'user story', 'cenário', 'scenario', 'teste']
-        
-        def is_new_separator(line):
-            """Verifica se a linha é um separador de caso (Requisito/Cenário)"""
-            lower_line = line.lower()
-            return any(sep in lower_line for sep in case_separators)
+        case_separators = ['historia', 'requisito', 'user story', 'cenário', 'scenario', 'teste', 'feature']
 
         for line in lines:
             line = line.strip()
             
             if not line:
-                # Linha vazia: finaliza o bloco de texto atual, mas não reseta o caso
                 current_gherkin_field = None
                 continue
                 
             lower_line = line.lower()
             
-            # 1. DETECÇÃO POR SEPARADORES (Requisito/Cenário)
-            if 'historia/requisito:' in lower_line or 'história/requisito:' in lower_line or 'feature:' in lower_line or (is_new_separator(line) and 'cenário' not in lower_line and 'teste' not in lower_line):
-                # Se encontrar um novo Requisito, salva o caso anterior se tiver conteúdo
+            # DETECÇÃO DE REQUISITO/FEATURE
+            is_req_or_feature = any(kw in lower_line for kw in ['historia', 'requisito', 'feature'])
+            is_scenario = any(kw in lower_line for kw in ['cenário', 'scenario', 'teste'])
+
+            if is_req_or_feature and not is_scenario:
                 if any(current_case.values()):
-                    # Limpa o whitespace final antes de salvar
                     for key in current_case: current_case[key] = current_case[key].strip()
                     test_cases.append(current_case.copy())
                 current_case = {key: '' for key in current_case}
@@ -541,14 +584,13 @@ class DocumentToExcelConverter:
                 current_gherkin_field = None
                 continue
                     
-            elif 'cenário:' in lower_line or 'scenario:' in lower_line or 'teste:' in lower_line or ('cenário' in lower_line or 'scenario' in lower_line or 'teste' in lower_line):
-                # Se encontrar um novo Cenário, zera os passos Gherkin e define o Cenário
+            # DETECÇÃO DE CENÁRIO/TESTE
+            elif is_scenario:
                 if current_case['teste'] and any(current_case.values()):
-                    # Se já houver um cenário (múltiplos cenários no mesmo Requisito)
                     for key in current_case: current_case[key] = current_case[key].strip()
                     test_cases.append(current_case.copy())
                     current_case = {
-                        'historia_requisito': current_case['historia_requisito'], # Mantém o Requisito
+                        'historia_requisito': current_case['historia_requisito'],
                         'teste': '', 'dado': '', 'quando': '', 'entao': ''
                     }
                     
@@ -556,7 +598,7 @@ class DocumentToExcelConverter:
                 current_gherkin_field = None
                 continue
                 
-            # 2. DETECÇÃO E MUDANÇA DE ESTADO GHERKIN
+            # DETECÇÃO E MUDANÇA DE ESTADO GHERKIN
             elif lower_line.startswith('dado') or lower_line.startswith('given'):
                 current_gherkin_field = 'dado'
                 current_case['dado'] += self.clean_gherkin_keyword(line) + " "
@@ -572,13 +614,11 @@ class DocumentToExcelConverter:
                 current_case['entao'] += self.clean_gherkin_keyword(line) + " "
                 continue
             
-            # 3. CONTINUAÇÃO DE TEXTO
+            # CONTINUAÇÃO DE TEXTO
             elif current_gherkin_field:
-                # Se estiver em um estado Gherkin e a linha não for um novo passo/separador,
-                # adiciona a linha como continuação
                 current_case[current_gherkin_field] += line + " "
                 
-        # Adiciona o último caso (limpa o whitespace final)
+        # Adiciona o último caso
         if any(current_case.values()):
             for key in current_case:
                 current_case[key] = current_case[key].strip()
@@ -586,30 +626,25 @@ class DocumentToExcelConverter:
             
         return test_cases if test_cases else self.create_fallback_cases(content)
 
+    # CORREÇÃO INTEGRADA DA FUNÇÃO DE LIMPEZA
     def clean_gherkin_keyword(self, text):
-        """Remove palavras-chave Gherkin e limpa espaços (v2)"""
+        """Remove palavras-chave Gherkin e limpa espaços."""
         keywords = ['dado que', 'dado', 'given', 'quando', 'when', 'então', 'entao', 'then', 'e', 'and']
-        
-        # Cria uma lista de padrões de expressão regular para Gherkin seguido por espaço, vírgula ou dois pontos
-        regex_patterns = [rf"^{re.escape(kw)}[\s:,]" for kw in keywords]
         
         lower_text = text.lower()
         
         for keyword in keywords:
-            # 1. Tenta encontrar a palavra-chave exatamente no início da linha
             if lower_text.startswith(keyword):
-                # 2. Tenta remover a palavra-chave seguida por qualquer separador comum (espaço, vírgula, dois pontos)
-                # Exemplo: "Dado:..." ou "Quando,..."
+                # Tenta remover a palavra-chave seguida por qualquer separador comum (espaço, vírgula, dois pontos)
                 pattern = rf"^{re.escape(keyword)}[\s:,]*"
                 match = re.match(pattern, text, re.IGNORECASE)
                 
                 if match:
-                    # Retorna o texto após a correspondência, mantendo a capitalização original do corpo do texto
+                    # Retorna o texto após a correspondência
                     return text[match.end():].strip()
                 
-        # Fallback: se não começar com palavra-chave reconhecida, retorna o texto original
+        # Fallback
         return text.strip()
-    #FIM DA FUNÇÃO
 
     def extract_after_colon(self, text):
         """Extrai texto após dois pontos, se existir"""
@@ -617,23 +652,6 @@ class DocumentToExcelConverter:
             return text.split(':', 1)[1].strip()
         return text.strip()
     
-    def clean_gherkin_keyword(self, text):
-        """Remove palavras-chave Gherkin"""
-        keywords = ['dado que', 'dado', 'given', 'quando', 'when', 'então', 'entao', 'then', 'e', 'and']
-        cleaned_text = text.lower()
-        
-        # Tenta remover a palavra-chave no início da linha
-        for keyword in keywords:
-            if cleaned_text.startswith(keyword):
-                # Se a palavra-chave estiver seguida por ":" (como "Quando:"), preserva o texto após ":"
-                if ':' in text:
-                    return text.split(':', 1)[1].strip()
-                # Senão, remove a palavra-chave e capitaliza
-                return text[len(keyword):].strip().capitalize()
-                
-        # Fallback: se não começar com palavra-chave, retorna o texto original
-        return text
-
     def create_fallback_cases(self, content):
         """Cria casos de teste fallback"""
         test_cases = []
@@ -780,6 +798,7 @@ class DocumentToExcelConverter:
         
         recommendations += "🎯 AÇÕES RECOMENDADAS:\n"
         recommendations += "   • Revise e edite os casos na pré-visualização\n"
+            
         recommendations += "   • Use templates diferentes para diferentes necessidades\n"
         recommendations += "   • Exporte para Excel para análise adicional\n"
         
