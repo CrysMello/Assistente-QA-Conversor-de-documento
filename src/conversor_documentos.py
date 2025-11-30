@@ -16,27 +16,32 @@ except ImportError:
     try:
         import pypdf as PyPDF2
     except ImportError:
-        messagebox.showerror("Erro", "Biblioteca PDF não encontrada. Instale PyPDF2 ou pypdf.")
-
+        # Erro genérico para informar que a biblioteca é necessária
+        pass
+    
 try:
     import docx
 except ImportError:
-    messagebox.showerror("Erro", "Biblioteca docx não encontrada. Instale python-docx.")
+    # Erro genérico para informar que a biblioteca é necessária
+    pass
     
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
 except ImportError:
-    messagebox.showerror("Erro", "Biblioteca openpyxl não encontrada. Instale openpyxl.")
+    # Erro genérico para informar que a biblioteca é necessária
+    pass
 
-# Adicionando a biblioteca tabula-py, que é necessária para extração de tabelas PDF
+# Adicionando a biblioteca tabula-py
 try:
     from tabula import read_pdf
 except ImportError:
-    # A falha aqui é esperada se o PyInstaller não for rodado corretamente.
     pass 
 
 class DocumentToExcelConverter:
+    # Novo caminho para o arquivo de templates
+    TEMPLATE_FILE = Path("templates.json")
+    
     def __init__(self, root):
         self.root = root
         self.root.title("🧪 Assistente QA - Conversor de Documentos para Casos de Teste")
@@ -63,8 +68,9 @@ class DocumentToExcelConverter:
         self.root.geometry('{}x{}+{}+{}'.format(width, height, x, y))
         
     def load_templates(self):
-        """Carrega os templates de conversão"""
-        return {
+        """Carrega templates do arquivo JSON, ou retorna o padrão se o arquivo não existir."""
+        # 1. Templates padrão (fallback)
+        default_templates = {
             "padrao_gherkin": {
                 "name": "Padrão Gherkin",
                 "columns": ['Historia/Requisito', 'Cenário', 'Dado', 'Quando', 'Então'],
@@ -98,6 +104,34 @@ class DocumentToExcelConverter:
                 }
             }
         }
+        
+        # 2. Tenta carregar do arquivo templates.json
+        if self.TEMPLATE_FILE.exists():
+            try:
+                with open(self.TEMPLATE_FILE, 'r', encoding='utf-8') as f:
+                    saved_templates = json.load(f)
+                
+                # Mescla templates padrão com salvos (os salvos têm prioridade)
+                default_templates.update(saved_templates)
+                return default_templates
+            except Exception as e:
+                print(f"Erro ao carregar templates do arquivo JSON: {e}")
+        
+        return default_templates
+
+    def save_templates(self):
+        """Salva os templates personalizados em arquivo JSON."""
+        default_keys = ['padrao_gherkin', 'teste_detalhado', 'simple']
+        
+        # Filtra apenas templates personalizados (não os padrões)
+        custom_templates = {key: template for key, template in self.templates.items() if key not in default_keys}
+        
+        try:
+            with open(self.TEMPLATE_FILE, 'w', encoding='utf-8') as f:
+                # ensure_ascii=False para salvar acentos e caracteres especiais corretamente
+                json.dump(custom_templates, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            messagebox.showerror("Erro de Salvamento", f"Não foi possível salvar templates: {e}")
 
     def setup_ui(self):
         # Frame principal com notebook para abas
@@ -184,25 +218,12 @@ class DocumentToExcelConverter:
         # Treeview
         self.setup_preview_tree(preview_frame)
         
-        # As barras de rolagem são criadas dentro de setup_preview_tree para recriação correta
-        # Mas precisamos delas aqui para garantir que self.preview_tree exista para o grid:
-        if not hasattr(self, 'preview_tree'):
-            self.preview_tree = ttk.Treeview(preview_frame, columns=['#0'], show='headings')
-
-        v_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=self.preview_tree.yview)
-        h_scrollbar = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
-        
-        self.preview_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        v_scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        h_scrollbar.grid(row=1, column=0, sticky=(tk.W, tk.E))
-        
-        
     def setup_preview_tree(self, parent_frame):
         """Configura a treeview de pré-visualização, destruindo a existente se necessário."""
         current_template = self.templates[self.current_template]
         columns = current_template["columns"]
     
-        # 1. Destruir treeview e scrollbars existentes para evitar sobreposição
+        # 1. Destruir treeview e scrollbars existentes
         for widget in parent_frame.winfo_children():
             if isinstance(widget, ttk.Treeview):
                 widget.destroy()
@@ -245,7 +266,11 @@ class DocumentToExcelConverter:
         template_display.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
         
         ttk.Button(select_frame, text="🔄 Atualizar Visualização", 
-                  command=self.update_template_preview).grid(row=0, column=2)
+                  command=self.update_template_preview).grid(row=0, column=2, padx=5)
+
+        # Botão para excluir template
+        ttk.Button(select_frame, text="🗑️ Excluir Template", 
+                  command=self.delete_template).grid(row=0, column=3, padx=5)
         
         # Visualização do template
         preview_frame = ttk.LabelFrame(self.template_frame, text="👁️ VISUALIZAÇÃO DO TEMPLATE", padding="10")
@@ -332,6 +357,10 @@ class DocumentToExcelConverter:
             messagebox.showerror("Erro", "Por favor, preencha todos os campos.")
             return
             
+        if name in self.templates:
+            messagebox.showerror("Erro", f"Já existe um template com o nome '{name}'.")
+            return
+            
         columns = [col.strip() for col in columns_text.split(',')]
         
         # Criar mapeamento básico
@@ -349,13 +378,38 @@ class DocumentToExcelConverter:
             "mappings": mappings
         }
         
+        # SALVAR TEMPLATES NO ARQUIVO
+        self.save_templates()
+        
         # Atualizar combobox
         self.template_var.set(name)
         self.on_template_change()
         
-        messagebox.showinfo("Sucesso", f"Template '{name}' criado com sucesso!")
+        messagebox.showinfo("Sucesso", f"Template '{name}' criado e salvo com sucesso!")
         self.new_template_name.delete(0, tk.END)
         self.new_template_columns.delete(0, tk.END)
+
+    def delete_template(self):
+        """Exclui template personalizado e atualiza o arquivo JSON."""
+        current_template = self.template_var.get()
+        default_templates = ['padrao_gherkin', 'teste_detalhado', 'simple']
+        
+        if current_template in default_templates:
+            messagebox.showerror("Erro", "Não é possível excluir templates padrão.")
+            return
+            
+        if messagebox.askyesno("Confirmar", f"Tem certeza que deseja excluir o template '{current_template}'?"):
+            # Remove o template da memória
+            del self.templates[current_template]
+            
+            # Salva a alteração no arquivo
+            self.save_templates()
+            
+            # Volta para template padrão e atualiza
+            self.template_var.set("padrao_gherkin")
+            self.on_template_change()
+            
+            messagebox.showinfo("Sucesso", f"Template '{current_template}' excluído!")
         
     def attach_document(self):
         """Anexa um documento para conversão"""
