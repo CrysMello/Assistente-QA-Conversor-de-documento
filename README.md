@@ -138,6 +138,8 @@ conversor_documentos/
 ├── build/                       # Arquivos de build
 ├── dist/                        # Executável final
 └── README.md                    # Esta documentação
+
+
 Arquitetura da Aplicação
 python
 DocumentToExcelConverter
@@ -147,6 +149,7 @@ DocumentToExcelConverter
 ├── parse_test_cases()           # Análise de conteúdo
 ├── analyze_quality()            # Métricas de qualidade
 └── export_to_excel()            # Exportação
+
 🔧 Desenvolvimento
 Estrutura de Classes Principais
 python
